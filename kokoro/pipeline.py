@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from loguru import logger
 from misaki import en, espeak
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from typing import Callable, Generator, List, Optional, Tuple, Union, Dict
 import re
 import torch
 import os
@@ -68,7 +68,8 @@ class KPipeline:
         model: Union[KModel, bool] = True,
         trf: bool = False,
         en_callable: Optional[Callable[[str], str]] = None,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        config: Union[Dict, str, None] = None
     ):
         """Initialize a KPipeline.
         
@@ -106,7 +107,7 @@ class KPipeline:
                 else:
                     device = 'cpu'
             try:
-                self.model = KModel(repo_id=repo_id).to(device).eval()
+                self.model = KModel(repo_id=repo_id, config=config).to(device).eval()
             except RuntimeError as e:
                 if device == 'cuda':
                     raise RuntimeError(f"""Failed to initialize model on CUDA: {e}. 

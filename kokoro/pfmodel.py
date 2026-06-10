@@ -186,6 +186,7 @@ class KModel(torch.nn.Module):
         ref_s: torch.FloatTensor,
         speed: float = 1
     ) -> tuple[torch.FloatTensor, torch.LongTensor]:
+
         input_lengths = torch.full(
             (input_ids.shape[0],), 
             input_ids.shape[-1], 
@@ -193,26 +194,94 @@ class KModel(torch.nn.Module):
             dtype=torch.long
         )
 
-        text_mask = torch.arange(input_lengths.max()).unsqueeze(0).expand(input_lengths.shape[0], -1).type_as(input_lengths)
-        text_mask = torch.gt(text_mask+1, input_lengths.unsqueeze(1)).to(self.device)
-        bert_dur = self.bert(input_ids, attention_mask=(~text_mask).int())
-        d_en = self.bert_encoder(bert_dur).transpose(-1, -2)
-        s = ref_s[:, 128:]
-        d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-        x, _ = self.predictor.lstm(d)
-        duration = self.predictor.duration_proj(x)
-        duration = torch.sigmoid(duration).sum(axis=-1) / speed
-        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
-        indices = torch.repeat_interleave(torch.arange(input_ids.shape[1], device=self.device), pred_dur)
+        text_mask = (
+                torch.gt(
+                    ( 1 + (
+                        torch.arange(float(input_lengths.max()))
+                        .unsqueeze(0)
+                        .expand(input_lengths.shape[0], -1)
+                        .type_as(input_lengths)
+                        ) 
+                     )
+                    ,
+                    input_lengths.unsqueeze(1)).to(self.device)
+                )
+
+        ref_s_tail = ref_s[:, 128:]
+        ref_s_head = ref_s[:, :128]
+        d = self.predictor.text_encoder(
+                (
+                    self.bert_encoder(
+                        self.bert(
+                            input_ids,
+                            attention_mask=(
+                                ~ text_mask
+                                ).int()
+                            )
+                        ).transpose(-1, -2)
+                    )
+                ,
+                ref_s_tail,
+                input_lengths,
+                text_mask
+                ,
+                )
+
+        prediction_duration= (
+                torch.round(
+                    torch.sigmoid(
+                        self.predictor.duration_proj(
+                            # Project Long Shor Term Memory
+                            self.predictor.lstm(d)[0]
+                            )
+                        )
+                            .sum(dim=-1)
+                            / speed
+                    )
+                .clamp(min=1)
+                .long()
+                .squeeze()
+                )
+
+        indices = torch.repeat_interleave(
+                torch.arange(
+                    input_ids.shape[1],
+                    device=self.device
+                    )
+                ,
+                prediction_duration
+                )
+
         pred_aln_trg = torch.zeros((input_ids.shape[1], indices.shape[0]), device=self.device)
         pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
         pred_aln_trg = pred_aln_trg.unsqueeze(0).to(self.device)
-        en = d.transpose(-1, -2) @ pred_aln_trg
-        F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
-        t_en = self.text_encoder(input_ids, input_lengths, text_mask)
-        asr = t_en @ pred_aln_trg
-        audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128]).squeeze()
-        return audio, pred_dur
+
+        F0_pred, N_pred = self.predictor.F0Ntrain(
+                d.transpose(-1, -2)
+                @
+                pred_aln_trg
+                ,
+                ref_s_tail
+                )
+
+        audio = self.decoder(
+                (
+                    self.text_encoder(
+                        input_ids,
+                        input_lengths,
+                        text_mask
+                        )
+                    @
+                    pred_aln_trg
+                )
+                ,
+                F0_pred,
+                N_pred,
+                ref_s_head
+                ,
+                ).squeeze()
+
+        return audio, prediction_duration
 
     def forward(
         self,
@@ -221,16 +290,23 @@ class KModel(torch.nn.Module):
         speed: float = 1,
         return_output: bool = False
     ) -> Union['KModel.Output', torch.FloatTensor]:
-        input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
-        logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
-        assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
+
+        input_ids = [self.vocab[p] for p in phonemes if self.vocab.get(p) is not None]
         input_ids = torch.LongTensor([[0, *input_ids, 0]]).to(self.device)
         ref_s = ref_s.to(self.device)
+
+        logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
+        assert len(input_ids) + 2 <= self.context_length, "ids > (context - 2)"
         audio, pred_dur = self.forward_with_tokens(input_ids, ref_s, speed)
         audio = audio.squeeze().cpu()
-        pred_dur = pred_dur.cpu() if pred_dur is not None else None
+
+        if pred_dur is not None:
+            pred_dur = pred_dur.cpu()
         logger.debug(f"pred_dur: {pred_dur}")
-        return self.Output(audio=audio, pred_dur=pred_dur) if return_output else audio
+
+        if return_output:
+            return self.Output(audio=audio, pred_dur=pred_dur)
+        return audio
 
 class KModelForONNX(torch.nn.Module):
     def __init__(self, kmodel: KModel):

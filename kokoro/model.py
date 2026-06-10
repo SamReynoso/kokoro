@@ -1,12 +1,17 @@
-from .istftnet import Decoder
-from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
-from dataclasses import dataclass
-from huggingface_hub import hf_hub_download
-from loguru import logger
-from transformers import AlbertConfig
-from typing import Dict, Optional, Union
 import json
 import torch
+
+from loguru import logger
+from huggingface_hub import hf_hub_download
+from transformers import AlbertConfig
+
+from .istftnet import Decoder
+from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
+
+from dataclasses import dataclass
+from typing import Dict, Optional, Union
+from torch import FloatTensor, LongTensor
+
 
 class KModel(torch.nn.Module):
     '''
@@ -47,6 +52,7 @@ class KModel(torch.nn.Module):
             with open(config, 'r', encoding='utf-8') as r:
                 config = json.load(r)
                 logger.debug(f"Loaded config: {config}")
+        assert isinstance(config, dict)
         self.vocab = config['vocab']
         self.bert = CustomAlbert(AlbertConfig(vocab_size=config['n_token'], **config['plbert']))
         self.bert_encoder = torch.nn.Linear(self.bert.config.hidden_size, config['hidden_dim'])
@@ -80,16 +86,16 @@ class KModel(torch.nn.Module):
 
     @dataclass
     class Output:
-        audio: torch.FloatTensor
-        pred_dur: Optional[torch.LongTensor] = None
+        audio: FloatTensor
+        pred_dur: Optional[LongTensor] = None
 
     @torch.no_grad()
     def forward_with_tokens(
         self,
-        input_ids: torch.LongTensor,
-        ref_s: torch.FloatTensor,
+        input_ids: LongTensor,
+        ref_s: FloatTensor,
         speed: float = 1
-    ) -> tuple[torch.FloatTensor, torch.LongTensor]:
+    ) -> tuple[FloatTensor, LongTensor]:
         input_lengths = torch.full(
             (input_ids.shape[0],), 
             input_ids.shape[-1], 
@@ -121,14 +127,14 @@ class KModel(torch.nn.Module):
     def forward(
         self,
         phonemes: str,
-        ref_s: torch.FloatTensor,
+        ref_s: FloatTensor,
         speed: float = 1,
         return_output: bool = False
-    ) -> Union['KModel.Output', torch.FloatTensor]:
-        input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
+    ) -> Union['KModel.Output', FloatTensor]:
+        input_ids = [self.vocab[p] for p in phonemes if self.vocab.get(p) is not None]
         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
         assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
-        input_ids = torch.LongTensor([[0, *input_ids, 0]]).to(self.device)
+        input_ids = LongTensor([[0, *input_ids, 0]]).to(self.device)
         ref_s = ref_s.to(self.device)
         audio, pred_dur = self.forward_with_tokens(input_ids, ref_s, speed)
         audio = audio.squeeze().cpu()
@@ -143,9 +149,9 @@ class KModelForONNX(torch.nn.Module):
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
-        ref_s: torch.FloatTensor,
+        input_ids: LongTensor,
+        ref_s: FloatTensor,
         speed: float = 1
-    ) -> tuple[torch.FloatTensor, torch.LongTensor]:
+    ) -> tuple[FloatTensor, LongTensor]:
         waveform, duration = self.kmodel.forward_with_tokens(input_ids, ref_s, speed)
         return waveform, duration
